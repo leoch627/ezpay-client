@@ -1,0 +1,23 @@
+﻿# 构建产物
+/build/
+
+# 运行数据（含 DPAPI 加密的密钥、SQLite 队列）
+/data/
+
+# 二进制
+*.exe
+*.dll
+*.pdb
+*.lib
+*.obj
+
+# 测试临时
+*.tmp
+*.log
+
+# 编辑器
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
