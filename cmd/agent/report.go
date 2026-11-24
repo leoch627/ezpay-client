@@ -49,10 +49,28 @@ type reportBody struct {
 }
 
 // reportResp 是 epay 的响应。
+//
+// 兼容两套字段名：
+//   - 本项目 ezpay：{"code":1,"msg":"matched","trade_no":"…"}
+//   - 其它易支付实现常见：{"code":1,"message":"…"} 或 {"status":"success"}
 type reportResp struct {
 	Code    int    `json:"code"`
 	Msg     string `json:"msg"`
+	Message string `json:"message"`
 	TradeNo string `json:"trade_no"`
+	Status  string `json:"status"`
+}
+
+// text 归一化后用于判断。
+func (r reportResp) text() string {
+	s := r.Msg
+	if s == "" {
+		s = r.Message
+	}
+	if s == "" {
+		s = r.Status
+	}
+	return strings.ToLower(s)
 }
 
 // ── 签名 ───────────────────────────────────────────────────────────
@@ -186,32 +204,44 @@ func (a *agent) forwardOne(ctx context.Context, it outbox.Item) (outcome, error)
 		return outcomeRetry, fmt.Errorf("收款站 %d：%s", res.StatusCode, truncate(string(raw), 160))
 	}
 
+	// 有些部署会把错误直接回 200 + HTML（nginx 兜底页等）。
+	// 先确认是 JSON，否则算重试——不能当成"成功"把单删了。
+	if len(raw) == 0 || raw[0] != '{' {
+		return outcomeRetry, fmt.Errorf("响应不是 JSON（可能被网关/反代拦截）：%s", truncate(string(raw), 160))
+	}
+
 	var rr reportResp
 	if err := json.Unmarshal(raw, &rr); err != nil {
 		return outcomeRetry, fmt.Errorf("响应不是 JSON：%s", truncate(string(raw), 160))
 	}
 
-	// epay 用 code 表达结果
+	// epay 用 code 表达结果。msg 统一转小写做包含判断，
+	// 因为不同实现的大小写和措辞不一致。
+	t := rr.text()
 	switch {
 	case rr.Code == 1:
 		a.logger.Printf("[report] #%d 已匹配订单 %s amount=%s", it.ID, rr.TradeNo, amount)
 		return outcomeDone, nil
-	case strings.Contains(rr.Msg, "duplicate"):
+	case rr.Code == 200:
+		// 某些实现用 200 表示"已接收"
+		a.logger.Printf("[report] #%d 收款站已接收 amount=%s", it.ID, amount)
+		return outcomeDone, nil
+	case strings.Contains(t, "duplicate"):
 		a.logger.Printf("[report] #%d 收款站已有这笔（去重命中）", it.ID)
 		return outcomeDone, nil
-	case strings.Contains(rr.Msg, "no matching order"):
+	case strings.Contains(t, "no matching order") || strings.Contains(t, "未匹配"):
 		// 钱收到了但没对上订单：留给人工补单，不要无限重试
 		a.logger.Printf("[report] #%d 到账 %s 未匹配订单（已在收款站记录）", it.ID, amount)
 		return outcomeDone, nil
-	case strings.Contains(rr.Msg, "bad sign"):
-		return outcomePause, fmt.Errorf("密钥不一致：%s", rr.Msg)
-	case strings.Contains(rr.Msg, "ts skew"):
-		return outcomePause, fmt.Errorf("本机时间与服务器差超过 300 秒，请开 NTP 同步：%s", rr.Msg)
-	case strings.Contains(rr.Msg, "bad amount"):
+	case strings.Contains(t, "bad sign"):
+		return outcomePause, fmt.Errorf("密钥不一致：%s", t)
+	case strings.Contains(t, "ts skew"):
+		return outcomePause, fmt.Errorf("本机时间与服务器差超过 300 秒，请开 NTP 同步：%s", t)
+	case strings.Contains(t, "bad amount"):
 		a.logger.Printf("[report] #%d 金额 %q 被拒，丢弃", it.ID, amount)
 		return outcomeDone, nil
 	default:
-		return outcomeRetry, fmt.Errorf("未预期响应 code=%d msg=%q", rr.Code, rr.Msg)
+		return outcomeRetry, fmt.Errorf("未预期响应 code=%d msg=%q", rr.Code, t)
 	}
 }
 

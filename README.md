@@ -1,4 +1,4 @@
-# wxhook
+﻿# wxhook
 
 Windows 便携程序：抓取微信收款到账，自动上报到 Linux 收款站。
 
